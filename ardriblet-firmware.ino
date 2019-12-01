@@ -25,8 +25,17 @@
 #include <Arduino.h>
 
 /* Button Pin Assignment controlled by Macro below */
-#define ARDRIBLET
-//#define EXAMPLE_DISPLAY
+//#define ARDRIBLET
+#define EXAMPLE_DISPLAY
+
+#define PRINT_INTRO
+
+#define US_ROUNDTRIP_CM   57   // microseconds (uS) it takes sound to travel "round-trip" 1cm (2cm total)
+#define VALVE_OPEN_TIME   8000
+
+/* LCD object created below */ 
+// Digital pins 13, 11, 10, 8 are routed the same on the Adriblet & Example display
+U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, 13, 11, 10, 8);
 
 /* 
  * bmps for the introduction artwork are defined below. 
@@ -421,6 +430,243 @@ static unsigned char martini_glass_bmp[] =
   0x00, 0xfc, 0x3f, 0x00, 0x00, 0xfc, 0x3f, 0x00
 };
 
+/*
+ *  Pins used to control the cart are defined below.
+ *  
+ *  Step pin: used to pulse the coils in the motor (rotate shaft)
+ *  Direction pin: used to control whether the cart moves forward or backward
+ *  Voltage pin: Enables/disables the voltage to the motor controller
+ *  
+ */
+enum motor_control_pins
+{
+  dirPin = 7,
+  stepPin = 23,
+  voltagePin = 22
+};
+
+/*  
+ *  Strength delay enumerated type
+ *  
+ *  Controls the delay time on the pumps
+ *  
+ *  Cocktail delays: weak, regular, strong
+ *  Pop strength delay.. one size fits all ;)
+ *  Shot delays: single or double
+ */
+enum drink_strength_delay_e
+{
+  DELAY_COCKTAIL_WEAK = 500,  // cocktail + pop (cocktail part)
+  DELAY_COCKTAIL_REG = 1000, // cocktail + pop (cocktail part)
+  DELAY_COCKTAIL_STRONG = 2000,  // cocktail + pop (cocktail part)
+  DELAY_POP_COCKTAIL_FILL = 4000, // cocktail + pop (pop part)
+  DELAY_POP_CHASE = 1000,  // pop intended for chase
+  DELAY_POP_MEDIUM = 2000,  // pop only (for the light-hearted) (;
+  DELAY_SHOT_SINGLE = 1000,  // shot only
+  DELAY_SHOT_DOUBLE = DELAY_SHOT_SINGLE * 2  // shot only
+};
+
+/*
+ *  HC-SR04 sensor enumerated type
+ *  
+ *  These definitions are specifc to the Arduino Mega microcontroller
+ *  Each entry in the enumerated type holds the bit corresponding to the 
+ *  sensor on a given port on the Arduino Mega
+ *  
+ *  Example: HC-SR04 sensor #1 is attached to pin 34 on the Arduino Mega.
+ *           Pin 34 corresponds to bit 4 on Port C so.. 0b00001000 on Port C
+ * 
+ *  More info on Arduino Mega Ports here: https://www.arduino.cc/en/Hacking/PinMapping2560
+ *  
+ */
+enum hc_sr04_port_bits_e
+{
+  PORT_BITS_SENSOR_1 = 0b00001000,      // on Port C digital pin 34
+  PORT_BITS_SENSOR_2 = 0b00000001,      // on Port C digital pin 37
+  PORT_BITS_SENSOR_3 = 0b00000100,      // on Port L digital pin 47
+  PORT_BITS_SENSOR_4 = 0b00000001,      // on Port L digital pin 49
+  PORT_BITS_SENSOR_5 = 0b00000100,      // on Port B digital pin 51
+  PORT_BITS_SENSOR_6 = 0b00001000,      // on Port E digital pin 5
+  PORT_BITS_SENSOR_7 = 0b00100000,      // on Port G digital pin 4
+  PORT_BITS_SENSOR_8 = 0b00100000,      // on Port E digital pin 3
+  PORT_BITS_SENSOR_9 = 0b01000000,      // on Port B digital pin 12
+  PORT_BITS_SENSOR_10 = 0b00010000,     // on Port E digital pin 2
+  PORT_BITS_SENSOR_TRIGGER = 0b00000100 // on Port C digital pin 35 (simply a trigger no drink to dispense)
+};
+
+/*
+ *  Enumerated type for HC-SR04 distances (in cm) to sense on the HC-SR04 sensor
+ *  
+ *  When the distance sensed by the HC-SR04 sensor is less than or equal to the 
+ *  distance defined below for the given sensor then we know the cart is under
+ *  the spout of a given spirit or pop
+ *  
+ */
+enum hc_sr04_sensor_distance_e
+{
+  DISTANCE_SPRITE = 4,        // on Port C
+  DISTANCE_COKE = 4,          // on Port C
+  DISTANCE_LEMONADE = 4,      // on Port L
+  DISTANCE_DEW = 4,           // on Port L
+  DISTANCE_GIN = 4,           // on Port B
+  DISTANCE_VODKA = 4,         // on Port E
+  DISTANCE_TEQUILA = 4,       // on Port G
+  DISTANCE_WHISKEY = 3,       // on Port E
+  DISTANCE_SPICED_RUM = 4,    // on Port B
+  DISTANCE_WHITE_RUM = 5      // on Port E
+}; //hc_sr04_sensor_distance_t;
+
+/*
+ *  Enumerated type defining all liquids that could be dispensed from the cocktail dispenser
+ *  Both pops & spirits are defined below.  
+ */
+enum liquids_e
+{
+  LIQUIDS_SPRITE = 0,
+  LIQUIDS_COKE = 1,
+  LIQUIDS_LEMONADE = 2,
+  LIQUIDS_DEW = 3,
+  LIQUIDS_GIN = 4,
+  LIQUIDS_VODKA = 5,
+  LIQUIDS_TEQUILA = 6,
+  LIQUIDS_WHISKEY = 7,
+  LIQUIDS_SPICED_RUM = 8,
+  LIQUIDS_WHITE_RUM = 9
+};
+
+/*
+ *  Enumerated type defining the pumps used on the cocktail dispenser 
+ *  
+ *  The pump dispensing is not a time sensitive operation.  So digital writes are used 
+ *  instead of direct port manipulation.
+ *  Spot numbering begins at the spot closest to the beginning point of the cart
+ *  (left side of dispenser when looking @ the front of the dispenser)
+ *    ie. spot #1 = Sprite
+ */
+enum pump_pins_e
+{
+  PUMP_SPRITE = 33,         // spot 1
+  PUMP_COKE = 32,           // spot 2
+  PUMP_LEMONADE = 31,       // spot 3
+  PUMP_DEW = 30,   // spot 4
+  PUMP_GIN = 29,            // spot 5
+  PUMP_VODKA = 28,          // spot 6 
+  PUMP_TEQUILA = 27,        // spot 7
+  PUMP_WHISKEY = 26,        // spot 8
+  PUMP_SPICED_RUM = 25,     // spot 9
+  PUMP_WHITE_RUM = 24       // spot 10
+};
+
+/*
+ *  Enumerated type defining the ball valves used for each pop/liquor used on the cocktail dispenser
+ *  
+ *  The ball valve writes do not represent a time sensitive operations.  Once again digital writes are used
+ *  instead of port manipulation. 
+ */
+enum ball_valve_pins_e
+{
+  BALL_VALVE_SPRITE = 44,       // spot 1
+  BALL_VALVE_COKE = 48,         // spot 2
+  BALL_VALVE_LEMONADE = 42,     // spot 3
+  BALL_VALVE_DEW = 40, // spot 4
+  BALL_VALVE_GIN = 36,          // spot 5
+  BALL_VALVE_VODKA = 43,        // spot 6
+  BALL_VALVE_TEQUILA = 38,      // spot 7
+  BALL_VALVE_WHISKEY = 50,      // spot 8
+  BALL_VALVE_SPICED_RUM = 52,   // spot 9
+  BALL_VALVE_WHITE_RUM = 9      // spot 10
+};
+
+enum menu_levels_e
+{
+  MAIN_MENU_LVL_1,
+  MAIN_MENU_LVL_2,
+  MAIN_MENU_LVL_3,
+  MAIN_MENU_LVL_4,
+};
+
+enum menu_states_e
+{
+  MENU_STATE_COCKTAILS = 0,
+  MENU_STATE_SHOTS,
+  MENU_STATE_POPS
+};
+
+enum cocktail_menu_state_e
+{
+  COCKTAIL_STATE_WHISKEY_COKE = 0,       
+  COCKTAIL_STATE_WHISKEY_LEMONADE,
+  COCKTAIL_STATE_WHISKEY_DEW,
+  COCKTAIL_STATE_WHISKEY_SPRITE,
+  COCKTAIL_STATE_WHITE_RUM_COKE,
+  COCKTAIL_STATE_WHITE_RUM_LEMONADE,
+  COCKTAIL_STATE_WHITE_RUM_DEW,
+  COCKTAIL_STATE_WHITE_RUM_SPRITE,
+  COCKTAIL_STATE_VODKA_COKE,
+  COCKTAIL_STATE_VODKA_LEMONADE,
+  COCKTAIL_STATE_VODKA_DEW,
+  COCKTAIL_STATE_VODKA_SPRITE,
+  COCKTAIL_STATE_RUM_COKE,
+  COCKTAIL_STATE_RUM_LEMONADE,
+  COCKTAIL_STATE_RUM_DEW,
+  COCKTAIL_STATE_RUM_SPRITE,
+  COCKTAIL_STATE_GIN_COKE,
+  COCKTAIL_STATE_GIN_LEMONADE,
+  COCKTAIL_STATE_GIN_DEW,
+  COCKTAIL_STATE_GIN_SPRITE,
+  COCKTAIL_STATE_TEQUILA_COKE,
+  COCKTAIL_STATE_TEQUILA_LEMONADE,
+  COCKTAIL_STATE_TEQUILA_DEW,
+  COCKTAIL_STATE_TEQUILA_SPRITE,
+  COCKTAIL_STATE_LONG_ISLAND
+};
+
+enum shot_menu_state_e
+{
+  SHOT_STATE_GIN = 0,
+  SHOT_STATE_RUM,
+  SHOT_STATE_TEQUILA,
+  SHOT_STATE_VODKA,
+  SHOT_STATE_WHISKEY,
+  SHOT_STATE_WHITE_RUM
+};
+
+enum pop_menu_state_e
+{
+  POP_STATE_SPRITE = 0,
+  POP_STATE_COKE,
+  POP_STATE_LEMONADE,
+  POP_STATE_DEW
+};
+
+enum cocktail_strength_state_e
+{
+  COCKTAIL_STRENGTH_STATE_WEAK = 0,
+  COCKTAIL_STRENGTH_STATE_REGULAR,
+  COCKTAIL_STRENGTH_STATE_STRONG,
+};
+
+enum shot_strength_state_e
+{
+  SHOT_STRENGTH_STATE_SINGLE = 0,
+  SHOT_STRENGTH_STATE_DOUBLE,
+};
+
+enum pop_strength_state_e
+{
+  POP_STRENGTH_STATE_SMALL = 0,
+  POP_STRENGTH_STATE_MEDIUM,
+};
+
+menu_levels_e menu_level = MAIN_MENU_LVL_1;
+cocktail_menu_state_e cocktail_state = COCKTAIL_STATE_WHISKEY_COKE;
+shot_menu_state_e shot_state = SHOT_STATE_GIN;
+pop_menu_state_e pop_state = POP_STATE_SPRITE;
+cocktail_strength_state_e cocktail_strength_state = COCKTAIL_STRENGTH_STATE_WEAK;
+shot_strength_state_e shot_strength_state = SHOT_STRENGTH_STATE_SINGLE;
+pop_strength_state_e pop_strength_state = POP_STRENGTH_STATE_SMALL;
+menu_states_e menu_state = MENU_STATE_COCKTAILS;
+
 // "random" seeds defined below to start bouncing balls at different location on display 
 int seeds[60] = {  
   2, 35, 8, 13, 72, 7,
@@ -458,73 +704,20 @@ int heading[60] = {
  *    Unfortunately I didn't use the same pins on each displays.  Hence the macros used below...
  */
 #if defined(EXAMPLE_DISPLAY)
-const int button1 = 2;
-const int button2 = 3;
-const int button3 = 18;
-const int button4 = 19;
+const int up_button = 2;
+const int down_button = 3;
+const int back_button = 18;
+const int select_button = 19;
 #elif defined(ARDRIBLET)
-const int button1 = 18;
-const int button2 = 19;
-const int button3 = 20;
-const int button4 = 21;
+const int up_button = 18;
+const int down_button = 19;
+const int back_button = 20;
+const int select_button = 21;
 #endif
 
-/*
- *  Pins used to control the cart are defined below.
- *  
- *  Step pin: used to pulse the coils in the motor (rotate shaft)
- *  Direction pin: used to control whether the cart moves forward or backward
- *  Voltage pin: Enables/disables the voltage to the motor controller
- *  
- */
-// Motor control pins
-int stepPin = 23;
-int dirPin = 7;
-int voltagePin = 22;
-
-// indicates what shot is highlighted on the menu..
-int strengthShadedRegion = 0;
-int prevShadedRegion = 0;
-int shadedRegion = 0;
-
-int strength = 0;
-int firstPass = 1;
-int menuLevel = 0;
-
-// Flag indicating we have passed the main menu and moved to the sub menu
-int firstPassSubMenu1 = 0;
-int shotMenuFirstPass = 1;
-int popMenuFirstPass = 1;
-int cockTailMenuFirstPass = 1;
-
+// the flags below are used handle prints to LCD depending on what button was pressed
 int upFlag = 0;
 int downFlag = 0;
-int selectFlag = 0;
-
-// These flags are used to control what menu is printed on the display
-// These flags represent the  second level in the menu control
-// Three possible menus could be printed depending on the selection from the
-// main menu or (first level if you will)
-int shotMenuFlag = 0;
-int popMenuFlag = 0;
-int cocktailMenuFlag = 0;
-
-int cockTailSelectFlag = 1;
-int shotSelectFlag = 1;
-int popSelectFlag = 1;
-// This is the equivalent of asking "are you sure" for each possible beverage
-// dumpThis_ stores the liquid to be dispensed and only reinitializes after
-// the drink has been dispensed
-int dumpThisCocktail = -1;
-int dumpThisShot = -1;
-int dumpThisPop = -1;
-
-int valve_open_time = 8000;
-
-unsigned int go_home_pulses = 5000;
-int pop_mix_delay = 2000;
-int chase_pop = 1000;
-int medium_pop = 2000;
 
 /*  
  *  Variables used for debounce calculations on all the switches
@@ -542,145 +735,7 @@ unsigned long debounceDelay = 50; // ms
 // these values are specific to the HC-SR04 distance calculations
 unsigned long initial_time_stamp = 0;
 unsigned long high_stamp = 0;
-int8_t sensed_distance = 127; // no need to care about distances greater than 127 cm (reason for 8 bits)..
-
-#define US_ROUNDTRIP_CM 57   // microseconds (uS) it takes sound to travel "round-trip" 1cm (2cm total)
-
-/*  
- *  Strength delay enumerated type
- *  
- *  Controls the delay time on the pumps
- *  
- *  Cocktail delays: weak, regular, strong
- *  Pop strength delay.. one size fits all ;)
- *  Shot delays: single or double
- */
-typedef enum
-{
-  DELAY_COCKTAIL_WEAK = 500,  // cocktail + pop (cocktail part)
-  DELAY_COCKTAIL_REG = 1000, // cocktail + pop (cocktail part)
-  DELAY_COCKTAIL_STRONG = 2000,  // cocktail + pop (cocktail part)
-  DELAY_POP_COCKTAIL_FILL = 4000, // cocktail + pop (pop part)
-  DELAY_POP_CHASE = 1000,  // pop intended for chase
-  DELAY_POP_MEDIUM = 2000,  // pop only (for the light-hearted) (;
-  DELAY_SHOT_SINGLE = 1000,  // shot only
-  DELAY_SHOT_DOUBLE = DELAY_SHOT_SINGLE * 2  // shot only
-} drink_strength_delay_t;
-
-/*
- *  HC-SR04 sensor enumerated type
- *  
- *  These definitions are specifc to the Arduino Mega microcontroller
- *  Each entry in the enumerated type holds the bit corresponding to the 
- *  sensor on a given port on the Arduino Mega
- *  
- *  Example: HC-SR04 sensor #1 is attached to pin 34 on the Arduino Mega.
- *           Pin 34 corresponds to bit 4 on Port C so.. 0b00001000 on Port C
- * 
- *  More info on Arduino Mega Ports here: https://www.arduino.cc/en/Hacking/PinMapping2560
- *  
- */
-typedef enum
-{
-  PORT_BITS_SENSOR_1 = 0b00001000,      // on Port C digital pin 34
-  PORT_BITS_SENSOR_2 = 0b00000001,      // on Port C digital pin 37
-  PORT_BITS_SENSOR_3 = 0b00000100,      // on Port L digital pin 47
-  PORT_BITS_SENSOR_4 = 0b00000001,      // on Port L digital pin 49
-  PORT_BITS_SENSOR_5 = 0b00000100,      // on Port B digital pin 51
-  PORT_BITS_SENSOR_6 = 0b00001000,      // on Port E digital pin 5
-  PORT_BITS_SENSOR_7 = 0b00100000,      // on Port G digital pin 4
-  PORT_BITS_SENSOR_8 = 0b00100000,      // on Port E digital pin 3
-  PORT_BITS_SENSOR_9 = 0b01000000,      // on Port B digital pin 12
-  PORT_BITS_SENSOR_10 = 0b00010000,     // on Port E digital pin 2
-  PORT_BITS_SENSOR_TRIGGER = 0b00000100 // on Port C digital pin 35 (simply a trigger no drink to dispense)
-} hc_sr04_port_bits_t;
-
-/*
- *  Enumerated type for HC-SR04 distances (in cm) to sense on the HC-SR04 sensor
- *  
- *  When the distance sensed by the HC-SR04 sensor is less than or equal to the 
- *  distance defined below for the given sensor then we know the cart is under
- *  the spout of a given spirit or pop
- *  
- */
-typedef enum
-{
-  DISTANCE_SPRITE = 4,        // on Port C
-  DISTANCE_COKE = 4,          // on Port C
-  DISTANCE_LEMONADE = 4,      // on Port L
-  DISTANCE_DEW = 4,           // on Port L
-  DISTANCE_GIN = 4,           // on Port B
-  DISTANCE_VODKA = 4,         // on Port E
-  DISTANCE_TEQUILA = 4,       // on Port G
-  DISTANCE_WHISKEY = 3,       // on Port E
-  DISTANCE_SPICED_RUM = 4,    // on Port B
-  DISTANCE_WHITE_RUM = 5      // on Port E
-} hc_sr04_sensor_distance_t;
-
-/*
- *  Enumerated type defining all liquids that could be dispensed from the cocktail dispenser
- *  Both pops & spirits are defined below.  
- */
-typedef enum
-{
-  LIQUIDS_SPRITE = 0,
-  LIQUIDS_COKE = 1,
-  LIQUIDS_LEMONADE = 2,
-  LIQUIDS_DEW = 3,
-  LIQUIDS_GIN = 4,
-  LIQUIDS_VODKA = 5,
-  LIQUIDS_TEQUILA = 6,
-  LIQUIDS_WHISKEY = 7,
-  LIQUIDS_SPICED_RUM = 8,
-  LIQUIDS_WHITE_RUM = 9
-} liquids_t;
-
-/*
- *  Enumerated type defining the pumps used on the cocktail dispenser 
- *  
- *  The pump dispensing is not a time sensitive operation.  So digital writes are used 
- *  instead of direct port manipulation.
- *  Spot numbering begins at the spot closest to the beginning point of the cart
- *  (left side of dispenser when looking @ the front of the dispenser)
- *    ie. spot #1 = Sprite
- */
-typedef enum
-{
-  PUMP_SPRITE = 33,         // spot 1
-  PUMP_COKE = 32,           // spot 2
-  PUMP_LEMONADE = 31,       // spot 3
-  PUMP_DEW = 30,   // spot 4
-  PUMP_GIN = 29,            // spot 5
-  PUMP_VODKA = 28,          // spot 6 
-  PUMP_TEQUILA = 27,        // spot 7
-  PUMP_WHISKEY = 26,        // spot 8
-  PUMP_SPICED_RUM = 25,     // spot 9
-  PUMP_WHITE_RUM = 24       // spot 10
-} pump_pins_t;
-
-/*
- *  Enumerated type defining the ball valves used for each pop/liquor used on the cocktail dispenser
- *  
- *  The ball valve writes do not represent a time sensitive operations.  Once again digital writes are used
- *  instead of port manipulation. 
- */
-typedef enum
-{
-  BALL_VALVE_SPRITE = 44,       // spot 1
-  BALL_VALVE_COKE = 48,         // spot 2
-  BALL_VALVE_LEMONADE = 42,     // spot 3
-  BALL_VALVE_DEW = 40, // spot 4
-  BALL_VALVE_GIN = 36,          // spot 5
-  BALL_VALVE_VODKA = 43,        // spot 6
-  BALL_VALVE_TEQUILA = 38,      // spot 7
-  BALL_VALVE_WHISKEY = 50,      // spot 8
-  BALL_VALVE_SPICED_RUM = 52,   // spot 9
-  BALL_VALVE_WHITE_RUM = 9      // spot 10
-} ball_valve_pins_t;
-
-/* LCD object created below */ 
-// Digital pins 13, 11, 10, 8 are routed the same on the Adriblet & Example display
-U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, 13, 11, 10, 8);
+int8_t sensed_distance = 127; // max is 127 (reason for 8 bits)..
 
 /*  
  *  @brief          Setup code for the Ardiblet
@@ -696,7 +751,7 @@ void setup(void) {
   u8g2.setBitmapMode(0);  // bmp draws the background too (not transparent)
 
   // Arduino Mega digital pins setup below
-  
+  Serial.begin(9600);
   // nothing connected to pin 0 RX for programming..
   // nothing connected to pin 1 TX for programming..
   pinMode(2, INPUT);    // 10th HC-SR04 sensor
@@ -751,32 +806,20 @@ void setup(void) {
   pinMode(51, INPUT);   // 5th HC-SR04 sensor
   pinMode(52, OUTPUT);  // 9th ball valve
   pinMode(53, OUTPUT);  // no connection
-  
-  // @TODO may need to enable interrupts prior to printing intro
+#if defined(PRINT_INTRO)
   print_intro();
+#endif
   interrupts();  // enable the interrupts after the intro is printed so some *jackass* doesn't
                  // advance the menu while we are going through the intro routine
   /** attach interrupts to the buttons below **/ 
-  attachInterrupt(digitalPinToInterrupt(button4), select, LOW); 
-  attachInterrupt(digitalPinToInterrupt(button2), down, LOW);
-  attachInterrupt(digitalPinToInterrupt(button1), up, LOW);
-  attachInterrupt(digitalPinToInterrupt(button3), back, LOW);
+  attachInterrupt(digitalPinToInterrupt(select_button), select, LOW); 
+  attachInterrupt(digitalPinToInterrupt(down_button), down, LOW);
+  attachInterrupt(digitalPinToInterrupt(up_button), up, LOW);
+  attachInterrupt(digitalPinToInterrupt(back_button), back, LOW);
   
 }
 
-/*  
- *  @brief          Infinitely looping code defined below
- *  @name           loop
- *  @parameter[in]  void
- *  @return         void
- *  @note           Function will never return
- */
-void loop(void) {
-
-  u8g2.setFontMode(1);
-  u8g2.setDrawColor(2);
-
-  /*
+/*
    * Pictorial representation of the menu levels shown below
    *  
    * menuLevel = 0 |                 Main Menu (Cocktails, Shots, Pop)
@@ -791,88 +834,75 @@ void loop(void) {
    * 
    * @note: The dispense display will print after a selection is made on menuLevel 2
    */
-  switch (menuLevel) {
+   
 
-    case 0://the main menu
-      mainMenuPrint(shadedRegion);
-      upFlag = 0;  
-      downFlag = 0;
+/*  
+ *  @brief          Infinitely looping code defined below
+ *  @name           loop
+ *  @parameter[in]  void
+ *  @return         void
+ *  @note           Function will never return
+ */
+void loop(void) 
+{
+  switch (menu_level) 
+  {
+    case MAIN_MENU_LVL_1://the main menu
+      mainMenuPrint(menu_state);
       break;
-    case 1: //sub menu (three options)
-      if (firstPassSubMenu1)
+      
+    case MAIN_MENU_LVL_2: //sub menu 
+      switch(menu_state)
       {
-        shadedRegion = 0;//new sub menu... new shaded region
-        switch (prevShadedRegion) 
-        {
-          //if prevShadedRegion = 0 then cocktails... if 1 then shots... if 2 then pop...
-          case 0:
-            cocktailMenuFlag = 1;
-            firstPassSubMenu1++;  
-            break;
-          case 1:
-            shotMenuFlag = 1;
-            firstPassSubMenu1++;
-            break;
-          case 2:
-            popMenuFlag = 1;
-            firstPassSubMenu1++;
-            break;
+        case MENU_STATE_COCKTAILS:
+          cockTailMenuPrint(cocktail_state);
+        break;
 
-        }//end of switch
+        case MENU_STATE_SHOTS:
+          shotMenuPrint(shot_state);
+        break;
 
-      }//end of if
+        case MENU_STATE_POPS:
+          popMenuPrint(pop_state);
+        break;
+      }
+    break;
+    
+    case MAIN_MENU_LVL_3: // selection here...
+      switch(menu_state)
+      {
+        case MENU_STATE_COCKTAILS:
+          cocktailStrengthPrint(cocktail_strength_state);
+        break;
 
-      // print the menu corresponding to the selection by the user
-      if (cocktailMenuFlag) 
-      {
-        cockTailMenuPrint(shadedRegion);
-      }//end of if
-      else if (shotMenuFlag) 
-      {
-        shotMenuPrint(shadedRegion);
-      }//end of else if
-      else if (popMenuFlag) 
-      {
-        popMenuPrint(shadedRegion);
-      }//end of else if
-      break;
+        case MENU_STATE_SHOTS:
+          shotStrengthPrint(shot_strength_state);
+        break;
 
-    case 2: // selection here...
-      if (cocktailMenuFlag)
+        case MENU_STATE_POPS:
+          popStrengthPrint(pop_strength_state);
+        break;
+      }
+    break;
+    
+    case MAIN_MENU_LVL_4: // here's where the action happens...
+      switch(menu_state)
       {
-        cocktailStrengthPrint();
-      }//end of if
-      else if (shotMenuFlag) 
-      {
-        shotStrengthPrint();
-      }//end of else if
-      else if (popMenuFlag) 
-      {
-        popStrengthPrint();
-      }//end of else if
-      break;
-    case 3: // here's where the action happens...
-      if (cocktailMenuFlag) 
-      {
-        //noInterrupts(); // disable interrupts
-        pourUpaDrink(dumpThisCocktail, strengthShadedRegion);
+        case MENU_STATE_COCKTAILS:
+          pourUpaCocktail(cocktail_state);
+        break;
 
-      }//end of if
-      else if (shotMenuFlag) 
-      {
-        //noInterrupts(); // disable interrupts
-        pourUpaDrink(dumpThisShot, strengthShadedRegion);
-      }//end of else if
-      else if (popMenuFlag) 
-      {
-        //noInterrupts(); // disable interrupts
-        pourUpaDrink(dumpThisPop, strengthShadedRegion);
-      }//end of else if
-      break;
+        case MENU_STATE_SHOTS:
+          pourUpaShot(shot_state);
+        break;
 
+        case MENU_STATE_POPS:
+          pourUpaPop(pop_state);
+        break;
+      }
+    break;
   }//end of switch
   u8g2.sendBuffer(); // send the menu data to the LCD
-
 }//end of loop
 
 /*  
@@ -883,64 +913,72 @@ void loop(void) {
  *  @parameter[in]  ball_valve_pins_t ball_valvePin - contains the ball valve to open 
  *  @return         void
  */
-void dispenseDrink(boolean pop, pump_pins_t pumpPin, ball_valve_pins_t ball_valvePin) 
+void dispenseDrink(boolean pop, pump_pins_e pumpPin, ball_valve_pins_e ball_valvePin) 
 {
-  int strengthDelay = 0;
-  if (cocktailMenuFlag) // a cocktail was selected
+  uint32_t strengthDelay = 0;
+  switch(menu_state)
   {
-    if (!pop) // liquor dump
-    {
-      switch (strengthShadedRegion) // determine the strength here.. 
+    case MENU_STATE_COCKTAILS:
+      if(pop) 
       {
-        case 0:
-          strengthDelay = DELAY_COCKTAIL_WEAK;
+        strengthDelay = DELAY_POP_COCKTAIL_FILL;
+      }
+      else
+      {
+        switch(cocktail_strength_state)
+        {
+          case COCKTAIL_STRENGTH_STATE_WEAK:
+            strengthDelay = DELAY_COCKTAIL_WEAK;
           break;
-        case 1:
-          strengthDelay = DELAY_COCKTAIL_REG;
+          case COCKTAIL_STRENGTH_STATE_REGULAR:
+            strengthDelay = DELAY_COCKTAIL_REG;
           break;
-        case 2:
-          strengthDelay = DELAY_COCKTAIL_STRONG;
+          case COCKTAIL_STRENGTH_STATE_STRONG:
+            strengthDelay = DELAY_COCKTAIL_STRONG;
           break;
-      }//end of switch
-    }//end of if
-    else // pop dump
-      strengthDelay = DELAY_POP_COCKTAIL_FILL;
-
-  }//end of if
-  else if (shotMenuFlag) { // SHOTS!
-
-    switch (strengthShadedRegion) {
-
-      case 0:
-        strengthDelay = DELAY_SHOT_SINGLE;
+        }
+      }
+    break;
+    
+    case MENU_STATE_SHOTS:
+      switch(shot_strength_state)
+      {
+        case SHOT_STRENGTH_STATE_SINGLE:
+          strengthDelay = DELAY_SHOT_SINGLE;
         break;
-      case 1:
-        strengthDelay = DELAY_SHOT_DOUBLE;
+        case SHOT_STRENGTH_STATE_DOUBLE:
+          strengthDelay = DELAY_SHOT_DOUBLE;
         break;
-    }
-
+      }
+    break;
+    
+    case MENU_STATE_POPS:
+      switch(pop_strength_state)
+      {
+        case POP_STRENGTH_STATE_SMALL:
+          strengthDelay = DELAY_POP_CHASE;
+        break;
+        case POP_STRENGTH_STATE_MEDIUM:
+          strengthDelay = DELAY_POP_MEDIUM;
+        break;
+      }
+    break;
   }
-  else // pop was selected... BUT not used to mix w/ liquor
-  {
-    switch (strengthShadedRegion) 
-    {
-      case 0:
-        strengthDelay = DELAY_POP_CHASE;
-        break;
-      case 1:
-        strengthDelay = DELAY_POP_MEDIUM;
-        break;
-    }
-  }
+  open_delay_and_close_valve(pumpPin, ball_valvePin, strengthDelay);
+}//end of dispenseDrink
+
+
+void open_delay_and_close_valve(pump_pins_e pumpPin, ball_valve_pins_e ball_valvePin, uint32_t delay_time)
+{
   digitalWrite(ball_valvePin, HIGH);  // open ball valve
-  delay(valve_open_time); // allow time for ball valve to open fully
+  delay(VALVE_OPEN_TIME); // allow time for ball valve to open fully
   digitalWrite(pumpPin, HIGH);  // turn on the pump
-  delay(strengthDelay); // delay based on the selected strength
+  delay(delay_time); // delay based on the selected strength
   digitalWrite(pumpPin, LOW); // turn off the pump
   digitalWrite(ball_valvePin, LOW); // turn off the ball valve
-  delay(valve_open_time); // allow time for ball valve to close completely 
+  delay(VALVE_OPEN_TIME); // allow time for ball valve to close completely 
+}
 
-}//end of dispenseDrink
 
 /*  
  *  @brief          Reset all the control values after a drink has been dispensed
@@ -950,30 +988,13 @@ void dispenseDrink(boolean pop, pump_pins_t pumpPin, ball_valve_pins_t ball_valv
  */
 void reset_control_values(void)
 {
-  // @TODO verify that all of these are needed
-  strength = 0;
-  firstPass = 1;
-  firstPassSubMenu1 = 0;
-  menuLevel = 0;
-  shadedRegion = 0;
-  prevShadedRegion = 0;
-  upFlag = 0;
-  downFlag = 0;
-  selectFlag = 0;
-  strengthShadedRegion = 0; //?
-  shotMenuFirstPass = 1;
-  popMenuFirstPass = 1;
-  cockTailMenuFirstPass = 1;
-  shotMenuFlag = 0;
-  popMenuFlag = 0;
-  cocktailMenuFlag = 0;
-  cockTailSelectFlag = 1;
-  shotSelectFlag = 1;
-  popSelectFlag = 1;
-  dumpThisCocktail = -1;
-  dumpThisShot = -1;
-  dumpThisPop = -1;
+  reset_menu_level();
+  reset_mainmenu_state();
+  reset_submenu_states();
+  reset_strength_states();
+  reset_button_flags();
 }// end of reset_control_values
+
 
 /*  
  *  @brief          Return the cart back to it's starting position (left side of the dispenser)
@@ -1005,241 +1026,241 @@ void go_home_youre_drunk(void)
   digitalWrite(voltagePin, LOW); // turn off the motor controller we made it home and hopefully didn't get a DUI (;
 }// end of go_home_youre_drunk
 
-/*  
- *  @brief          This is the master function that calls all other functions that are needed to pour a drink         
- *  @name           pourUpaDrink
- *  @parameter[in]  int selection - the spot that the cart needs to go to
- *  @parameter[in]  int strength - the selected strength
- *  @return         void
- *  
- */
-void pourUpaDrink(int selection, int strength)
+
+void pourUpaShot(shot_menu_state_e shot_selection)
 {
   digitalWrite(voltagePin, LOW); // force the motor controller to the off state
   digitalWrite(dirPin, HIGH); // setup the motor controller to drive motor to the right
   dispenseDisplay(); // display the dispense display
-  if (cocktailMenuFlag) // cocktail dispense only (dispensing two liquids maybe more for case of long island)
+
+  switch (shot_selection) 
   {
-    selection = dumpThisCocktail; // the selected cocktail by the user
-    switch (selection) // determine where to drive and what to dispense based on the selection by the user
-    {
-      // one underlying feature of the way this function executes is that each drink is dispensed such that
-      // the liquid closest to the cart is ALWAYS dispensed first.  Thus we always move the cart from left to right
-      // and then after the last liquid is dispensed we invert the direction and head for home.
-      // THE CART NEVER TRAVELS TO THE RIGHT THEN BACK TO THE LEFT AND THEN HOME!
-      // the code below is self explanatory 
-      // a reminder that the boolean simply indicates if pop will be dispensed (different associated delay)
-      case 0: //whiskey coke
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
-        dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
-        break;
-      case 1: // whiskey lemonade
-        drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
-        dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
-        drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
-        dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
-        break;
-      case 2: //whiskey dew
-        drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
-        dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
-        drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
-        dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
-        break;
-      case 3: // whiskey sprite
-        drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
-        dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
-        drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
-        dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
-        break;
-      case 4: //white rum + coke
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
-        dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
-        break;
-      case 5: //white rum + lemonade
-        drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
-        dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
-        drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
-        dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
-        break;
-      case 6: //white rum + mountain dew
-        drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
-        dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
-        drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
-        dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
-        break;
-      case 7: //white rum + sprite
-        drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
-        dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
-        drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
-        dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
-        break;
-      case 8: //vodka + coke
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
-        dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
-        break;
-      case 9: //vodka + lemonade
-        drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
-        dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
-        drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
-        dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
-        break;
-      case 10: //vodka + mountain dew
-        drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
-        dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
-        drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
-        dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
-        break;
-      case 11: //vodka + sprite
-        drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
-        dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
-        drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
-        dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
-        break;
-      case 12: //spiced rum + coke
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
-        dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
-        break;
-      case 13: //spiced rum + lemonade
-        drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
-        dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
-        drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
-        dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
-        break;
-      case 14: //spiced rum + mountain dew
-        drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
-        dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
-        drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
-        dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
-        break;
-      case 15: //spiced rum + sprite
-        drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
-        dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
-        drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
-        dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
-        break;
-      case 16: //gin + coke
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
-        dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
-        break;
-      case 17: //gin + lemonade
-        drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
-        dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
-        drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
-        dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
-        break;
-      case 18: //gin + dew
-        drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
-        dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
-        drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
-        dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
-        break;
-      case 19: //gin + sprite
-        drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
-        dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
-        drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
-        dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
-        break;
-      case 20: //tequila + coke
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
-        dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
-        break;
-      case 21: //tequila + lemonade
-        drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
-        dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
-        drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
-        dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
-        break;
-      case 22: //tequila + dew
-        drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
-        dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
-        drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
-        dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
-        break;
-      case 23: //tequila + sprite
-        drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
-        dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
-        drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
-        dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
-        break;
-      case 24: //long island
-      // @TODO complete the long island cocktail dump
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
-        dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
-        break;
-    }//end of switch
-    
-  }//end of if
-  else if (shotMenuFlag) // shot dispense only..
-  {
-    // a reminder that the motor controller is already setup to drive to the right..
-    switch (selection) 
-    {
-      case 0:
-        drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
-        dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
-        break;
-      case 1:
-        drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
-        dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
-        break;
-      case 2:
-        drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
-        dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
-        break;
-      case 3:
-        drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
-        dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
-        break;
-      case 4:
-        drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
-        dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
-        break;
-      case 5:
-        drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
-        dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
-        break;
-    }//end of switch
-  }//end of else if
-  else if (popMenuFlag) // pop dispense only..
-  {
-    switch (selection) 
-    {
-      case 0:
-        drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
-        dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
-        break;
-      case 1:
-        drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
-        dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
-        break;
-      case 2:
-        drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
-        dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
-        break;
-      case 3:
-        drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
-        dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
-        break;
-    }//end of switch
-  }
+    case SHOT_STATE_GIN:
+      drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
+      dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
+      break;
+    case SHOT_STATE_RUM:
+      drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
+      dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
+      break;
+    case SHOT_STATE_TEQUILA:
+      drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
+      dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
+      break;
+    case SHOT_STATE_VODKA:
+      drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
+      dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
+      break;
+    case SHOT_STATE_WHISKEY:
+      drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
+      dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
+      break;
+    case SHOT_STATE_WHITE_RUM:
+      drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
+      dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
+      break;
+  }//end of switch
   go_home_youre_drunk(); // send the cart back to the homeland
   reset_control_values(); // reset all the control values to prepare for the next dispense
   u8g2.clearBuffer(); // clear the display (don't need to sendBuffer here)
-}//end of pourUpaDrink
+}
+
+
+void pourUpaPop(pop_menu_state_e pop_selection)
+{
+  digitalWrite(voltagePin, LOW); // force the motor controller to the off state
+  digitalWrite(dirPin, HIGH); // setup the motor controller to drive motor to the right
+  dispenseDisplay(); // display the dispense display
+  switch (pop_selection) 
+  {
+    case POP_STATE_SPRITE:
+      drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
+      dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
+      break;
+    case POP_STATE_COKE:
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      break;
+    case POP_STATE_LEMONADE:
+      drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
+      dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
+      break;
+    case POP_STATE_DEW:
+      drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
+      dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
+      break;
+  }//end of switch
+  go_home_youre_drunk(); // send the cart back to the homeland
+  reset_control_values(); // reset all the control values to prepare for the next dispense
+  u8g2.clearBuffer(); // clear the display (don't need to sendBuffer here)
+}
+
+
+void pourUpaCocktail(cocktail_menu_state_e cocktail_selection)
+{
+  digitalWrite(voltagePin, LOW); // force the motor controller to the off state
+  digitalWrite(dirPin, HIGH); // setup the motor controller to drive motor to the right
+  dispenseDisplay(); // display the dispense display
+
+  switch (cocktail_selection) // determine where to drive and what to dispense based on the selection by the user
+  {
+    case COCKTAIL_STATE_WHISKEY_COKE: //whiskey coke
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
+      dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
+    break;
+    case COCKTAIL_STATE_WHISKEY_LEMONADE: // whiskey lemonade
+      drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
+      dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
+      drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
+      dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
+    break;
+    case COCKTAIL_STATE_WHISKEY_DEW: //whiskey dew
+      drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
+      dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
+      drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
+      dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
+    break;
+    case COCKTAIL_STATE_WHISKEY_SPRITE: // whiskey sprite
+      drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
+      dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
+      drive_motor_to_sensor(LIQUIDS_WHISKEY, DISTANCE_WHISKEY);
+      dispenseDrink(false, PUMP_WHISKEY, BALL_VALVE_WHISKEY);
+    break;
+    case COCKTAIL_STATE_WHITE_RUM_COKE: //white rum + coke
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
+      dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
+    break;
+    case COCKTAIL_STATE_WHITE_RUM_LEMONADE: //white rum + lemonade
+      drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
+      dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
+      drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
+      dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
+    break;
+    case COCKTAIL_STATE_WHITE_RUM_DEW: //white rum + mountain dew
+      drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
+      dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
+      drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
+      dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
+    break;
+    case COCKTAIL_STATE_WHITE_RUM_SPRITE: //white rum + sprite
+      drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
+      dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
+      drive_motor_to_sensor(LIQUIDS_WHITE_RUM, DISTANCE_WHITE_RUM);
+      dispenseDrink(false, PUMP_WHITE_RUM, BALL_VALVE_WHITE_RUM);
+    break;
+    case COCKTAIL_STATE_VODKA_COKE: //vodka + coke
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
+      dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
+    break;
+    case COCKTAIL_STATE_VODKA_LEMONADE: //vodka + lemonade
+      drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
+      dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
+      drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
+      dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
+    break;
+    case COCKTAIL_STATE_VODKA_DEW: //vodka + mountain dew
+      drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
+      dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
+      drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
+      dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
+    break;
+    case COCKTAIL_STATE_VODKA_SPRITE: //vodka + sprite
+      drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
+      dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
+      drive_motor_to_sensor(LIQUIDS_VODKA, DISTANCE_VODKA);
+      dispenseDrink(false, PUMP_VODKA, BALL_VALVE_VODKA);
+    break;
+    case COCKTAIL_STATE_RUM_COKE: //spiced rum + coke
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
+      dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
+    break;
+    case COCKTAIL_STATE_RUM_LEMONADE: //spiced rum + lemonade
+      drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
+      dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
+      drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
+      dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
+    break;
+    case COCKTAIL_STATE_RUM_DEW: //spiced rum + mountain dew
+      drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
+      dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
+      drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
+      dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
+    break;
+    case COCKTAIL_STATE_RUM_SPRITE: //spiced rum + sprite
+      drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
+      dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
+      drive_motor_to_sensor(LIQUIDS_SPICED_RUM, DISTANCE_SPICED_RUM);
+      dispenseDrink(false, PUMP_SPICED_RUM, BALL_VALVE_SPICED_RUM);
+    break;
+    case COCKTAIL_STATE_GIN_COKE: //gin + coke
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
+      dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
+    break;
+    case COCKTAIL_STATE_GIN_LEMONADE: //gin + lemonade
+      drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
+      dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
+      drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
+      dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
+    break;
+    case COCKTAIL_STATE_GIN_DEW: //gin + dew
+      drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
+      dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
+      drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
+      dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
+    break;
+    case COCKTAIL_STATE_GIN_SPRITE: //gin + sprite
+      drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
+      dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
+      drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
+      dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
+    break;
+    case COCKTAIL_STATE_TEQUILA_COKE: //tequila + coke
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
+      dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
+    break;
+    case COCKTAIL_STATE_TEQUILA_LEMONADE: //tequila + lemonade
+      drive_motor_to_sensor(LIQUIDS_LEMONADE, DISTANCE_LEMONADE);
+      dispenseDrink(true, PUMP_LEMONADE, BALL_VALVE_LEMONADE);
+      drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
+      dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
+    break;
+    case COCKTAIL_STATE_TEQUILA_DEW: //tequila + dew
+      drive_motor_to_sensor(LIQUIDS_DEW, DISTANCE_DEW);
+      dispenseDrink(true, PUMP_DEW, BALL_VALVE_DEW);
+      drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
+      dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
+    break;
+    case COCKTAIL_STATE_TEQUILA_SPRITE: //tequila + sprite
+      drive_motor_to_sensor(LIQUIDS_SPRITE, DISTANCE_SPRITE);
+      dispenseDrink(true, PUMP_SPRITE, BALL_VALVE_SPRITE);
+      drive_motor_to_sensor(LIQUIDS_TEQUILA, DISTANCE_TEQUILA);
+      dispenseDrink(false, PUMP_TEQUILA, BALL_VALVE_TEQUILA);
+    break;
+    case COCKTAIL_STATE_LONG_ISLAND: //long island
+    // @TODO complete the long island cocktail dump
+      drive_motor_to_sensor(LIQUIDS_COKE, DISTANCE_COKE);
+      dispenseDrink(true, PUMP_COKE, BALL_VALVE_COKE);
+      drive_motor_to_sensor(LIQUIDS_GIN, DISTANCE_GIN);
+      dispenseDrink(false, PUMP_GIN, BALL_VALVE_GIN);
+    break;
+  }//end of switch
+  go_home_youre_drunk(); // send the cart back to the homeland
+  reset_control_values(); // reset all the control values to prepare for the next dispense
+  u8g2.clearBuffer(); // clear the display (don't need to sendBuffer here)
+}
+
 
 /*  
  *  @brief          This is where all the magic happens.  This function keeps driving the motor and 
@@ -1290,7 +1311,7 @@ void pourUpaDrink(int selection, int strength)
  *
  * @note            The code is kept local to this function (time spent passing variables to a different function will slow down the motor)
  */
-boolean drive_motor_to_sensor(liquids_t sensor, hc_sr04_sensor_distance_t echo_distance)
+boolean drive_motor_to_sensor(liquids_e sensor, hc_sr04_sensor_distance_e echo_distance)
 {
   // each PORT toggle or set takes roughly 2 us
   digitalWrite(voltagePin, HIGH); // digitalWrites take a quarter century to write to pin, but ok here since no time sensitive code is being executed..
@@ -1580,43 +1601,20 @@ void select()
     lastDebounceTimeSelect = millis();
   else
     return;
-  if (!menuLevel) 
+  switch(menu_level)
   {
-    firstPassSubMenu1 = 1;
-    prevShadedRegion = shadedRegion;
-    shadedRegion = 0;
-    cockTailMenuFirstPass = 1;
-    shotMenuFirstPass = 1;
-    popMenuFirstPass = 1;
-  }//end of if
-  else
-  {
-    if (cockTailSelectFlag && (dumpThisCocktail == -1)) 
-    {
-      dumpThisCocktail = shadedRegion;
-    }//end of else-if
-    else if (cockTailSelectFlag && (dumpThisCocktail != -1)) 
-    {
-      strength = shadedRegion;
-    }//end of else if
-    if (shotSelectFlag && (dumpThisShot == -1)) 
-    {
-      dumpThisShot = shadedRegion;
-    }//end of else if
-    else if (shotSelectFlag && (dumpThisShot != -1)) 
-    {
-      strength = shadedRegion;
-    }//end of else if
-    if (popSelectFlag && (dumpThisPop == -1)) 
-    {
-      dumpThisPop = shadedRegion;
-    }//end of else if
-    else if (popSelectFlag && (dumpThisPop != -1)) 
-    {
-      strength = shadedRegion;
-    }//end of else if
+    case MAIN_MENU_LVL_1:
+      menu_level = MAIN_MENU_LVL_2;
+    break;
+    case MAIN_MENU_LVL_2:
+      menu_level = MAIN_MENU_LVL_3;
+    break;
+    case MAIN_MENU_LVL_3:
+      menu_level = MAIN_MENU_LVL_4;
+    break;
+    default:
+    break;
   }
-  menuLevel++;
 }// end of select
 
 /*
@@ -1628,12 +1626,10 @@ void select()
  */
 void dispenseDisplay() 
 {
-  
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_courB10_tf);
   u8g2.drawStr(5, 10, "Dispensing...");
   u8g2.sendBuffer();
-  
 } //end of dispenseDisplay
 
 /*
@@ -1649,40 +1645,34 @@ void dispenseDisplay()
  */
 void back() 
 {
-
-  if ((millis() - lastDebounceTimeBack) > debounceDelay)
-    lastDebounceTimeBack = millis();
-  else
-    return;  // switch noise
-    
-  menuLevel--;
-  if (menuLevel <= 0) {
-    
-    menuLevel = 0;
-    firstPassSubMenu1 = 0;
-    cocktailMenuFlag = 0;
-    shotMenuFlag = 0;
-    popMenuFlag = 0;
-    shadedRegion = 0;
-    
+  if ((millis() - lastDebounceTimeBack) > debounceDelay) lastDebounceTimeBack = millis();
+  else return;  // switch noise
+  reset_button_flags();
+  switch(menu_level)
+  {
+    case MAIN_MENU_LVL_1:
+      // do nothing! 
+    break;
+    case MAIN_MENU_LVL_2:
+      menu_level = MAIN_MENU_LVL_1;
+    break;
+    case MAIN_MENU_LVL_3:
+      menu_level = MAIN_MENU_LVL_2;
+    break;
+    case MAIN_MENU_LVL_4:
+    break;
   }
-  else if (menuLevel == 1) {
-
-    cockTailMenuFirstPass = 1;
-    shotMenuFirstPass = 1;
-    popMenuFirstPass = 1;
-    shadedRegion = 0;
-    strengthShadedRegion = 0;
-    
+  // the checks below are after menu_level has been decremented (3->2 || 2->1)
+  if(MAIN_MENU_LVL_1 == menu_level)
+  {
+    reset_mainmenu_state();
+    reset_submenu_states();
   }
-  dumpThisCocktail = -1;
-  dumpThisShot = -1;
-  dumpThisPop = -1;
-
-  cockTailSelectFlag = 1;
-  shotSelectFlag = 1;
-  popSelectFlag = 1;
-  
+  else if (MAIN_MENU_LVL_2 == menu_level) 
+  {
+    reset_submenu_states();
+    reset_strength_states();
+  }
 }//end of back
 
 /*
@@ -1698,71 +1688,54 @@ void back()
  *              execution of the code block.
  * 
  */ 
-void down() {
-
-  if ((millis() - lastDebounceTimeDown) > debounceDelay)
-    lastDebounceTimeDown = millis();
-  else
-    return;
-    
+void down() 
+{
+  if ((millis() - lastDebounceTimeDown) > debounceDelay) lastDebounceTimeDown = millis();
+  else return;
   downFlag = 1;
-  switch (menuLevel) {
-
-    case 0: //main menu
-      //* maximum of 3 options on menuLevel 0
-      //* Cocktails (shadedRegion 0)
-      //* Shots     (shadedRegion 1)
-      //* Pop       (shadedRegion 2)
-      shadedRegion++;
-      if (shadedRegion > 2)
-        shadedRegion = 0;
-      break;
-    case 1://sub menu
-
-      if (cocktailMenuFlag == 1) {
- 
-        shadedRegion++;
-        if (shadedRegion > 24)  // 24 options in the cocktail menu
-          shadedRegion = 0;
-
-      }//end of if
-      else if (shotMenuFlag == 1) {
-
-        shadedRegion++;
-        if (shadedRegion > 5)  // 5 options in the shot menu
-          shadedRegion = 0;
-
-      }
-      else if (popMenuFlag == 1) {
-
-        shadedRegion++;
-        if (shadedRegion > 3)  // 3 options in the pop menu
-          shadedRegion = 0;
-
-      }//end of else if
-      break;
+  switch (menu_level) {
+    case MAIN_MENU_LVL_1: 
+      if(MENU_STATE_POPS == menu_state) menu_state = MENU_STATE_COCKTAILS;
+      else menu_state = (int)menu_state + 1;
+    break;
       
-    case 2://selection menu
-      strengthShadedRegion++;
-      if (cocktailMenuFlag) {
+    case MAIN_MENU_LVL_2:
+      switch(menu_state)
+      {
+        case MENU_STATE_COCKTAILS:
+          if(COCKTAIL_STATE_LONG_ISLAND == cocktail_state) cocktail_state = COCKTAIL_STATE_WHISKEY_COKE;
+          else cocktail_state = (int)cocktail_state + 1;
+        break;
 
-        if (strengthShadedRegion > 2)  // 3 strength options for cocktails
-          strengthShadedRegion = 0;  
+        case MENU_STATE_SHOTS:
+          if(SHOT_STATE_WHITE_RUM == shot_state) shot_state = SHOT_STATE_GIN;
+          else shot_state = (int)shot_state + 1;
+        break;
 
-      }//end of if
-      else if (shotMenuFlag) {  // 2 strength options for shots
-
-        if (strengthShadedRegion > 1)
-          strengthShadedRegion = 0;
-          
-      }//end of else if
-      else if (popMenuFlag) {
-
-        if (strengthShadedRegion > 1)  // 2 strength options for pop
-          strengthShadedRegion = 0;
-
-      }//end of else if
-      break;
+        case MENU_STATE_POPS:
+          if(POP_STATE_DEW == pop_state) pop_state = POP_STATE_SPRITE;
+          else pop_state = (int)pop_state + 1;
+        break;
+      }
+    break;
+      
+    case MAIN_MENU_LVL_3:
+      switch(menu_state)
+      {
+        case MENU_STATE_COCKTAILS:
+          if(cocktail_strength_state == COCKTAIL_STRENGTH_STATE_STRONG) cocktail_strength_state = COCKTAIL_STRENGTH_STATE_WEAK;
+          else cocktail_strength_state = (int)cocktail_strength_state + 1;
+        break;
+        case MENU_STATE_SHOTS:
+          if(shot_strength_state == SHOT_STRENGTH_STATE_DOUBLE) shot_strength_state = SHOT_STRENGTH_STATE_SINGLE;
+          else shot_strength_state = (int)shot_strength_state + 1;
+        break;
+        case MENU_STATE_POPS:
+          if(pop_strength_state == POP_STRENGTH_STATE_MEDIUM) pop_strength_state = POP_STRENGTH_STATE_SMALL;
+          else pop_strength_state = (int)pop_strength_state + 1;
+        break;
+      }
+    break;
       
   }//end of switch
 
@@ -1782,70 +1755,53 @@ void down() {
  *              execution of the code block.
  * 
  */ 
-void up() {
-
-  if ((millis() - lastDebounceTimeDown) > debounceDelay)
-    lastDebounceTimeDown = millis();
-  else
-    return;
+void up() 
+{
+  if ((millis() - lastDebounceTimeDown) > debounceDelay) lastDebounceTimeDown = millis();
+  else return;
   upFlag = 1;
-  switch (menuLevel) {
-    // maximum of 3 options on menuLevel 0
-    // Cocktails (shadedRegion 0)
-    // Shots     (shadedRegion 1)
-    // Pop       (shadedRegion 2)
-    case 0:  //main menu
-      shadedRegion--;
-      if (shadedRegion < 0)
-        shadedRegion = 2;
-      break;
-    case 1:  //sub menu
-
-      if (cocktailMenuFlag == 1) {
-
-        shadedRegion--;
-        if (shadedRegion < 0)
-          shadedRegion = 24;  // 24 options in the cocktail menu
-
-      }//end of if
-      else if (shotMenuFlag == 1) {
-
-        shadedRegion--;
-        if (shadedRegion < 0)
-          shadedRegion = 5;  // 5 options in the shot menu
-
+  switch (menu_level) 
+  {
+    case MAIN_MENU_LVL_1:  //main menu
+      if(MENU_STATE_COCKTAILS == menu_state) menu_state = MENU_STATE_POPS;
+      else menu_state = (int)menu_state - 1;
+    break;
+    case MAIN_MENU_LVL_2:  //sub menu
+      switch(menu_state)
+      {
+        case MENU_STATE_COCKTAILS:
+          if(COCKTAIL_STATE_WHISKEY_COKE == cocktail_state) cocktail_state = COCKTAIL_STATE_LONG_ISLAND;
+          else cocktail_state = (int)cocktail_state - 1;
+        break;
+        case MENU_STATE_SHOTS:
+          if(SHOT_STATE_GIN == shot_state) shot_state = SHOT_STATE_WHITE_RUM;
+          else shot_state = (int)shot_state - 1;
+        break;
+        case MENU_STATE_POPS:
+          if(POP_STATE_SPRITE == pop_state) pop_state = POP_STATE_DEW;
+          else pop_state = (int)pop_state - 1;
+        break;
       }
-      else if (popMenuFlag == 1) {
+    break;
+    case MAIN_MENU_LVL_3:  //selection menu
+      switch(menu_state)
+      {
+        case MENU_STATE_COCKTAILS:
+          if(cocktail_strength_state == COCKTAIL_STRENGTH_STATE_WEAK) cocktail_strength_state = COCKTAIL_STRENGTH_STATE_STRONG;
+          else cocktail_strength_state = (int)cocktail_strength_state - 1;
+        break;
 
-        shadedRegion--;
-        if (shadedRegion < 0)
-          shadedRegion = 3;  // 3 options in the pop menu
+        case MENU_STATE_SHOTS:
+          if(shot_strength_state == SHOT_STRENGTH_STATE_SINGLE) shot_strength_state = SHOT_STRENGTH_STATE_DOUBLE;
+          else shot_strength_state = (int)shot_strength_state - 1;
+        break;
 
-      }//end of else if
-
-      break;
-    case 2:  //selection menu
-      //shadedRegion++;
-      strengthShadedRegion--;
-      if (cocktailMenuFlag == 1) {
-
-        if (strengthShadedRegion < 0)
-          strengthShadedRegion = 2;  // 3 strength options for cocktails
-
-      }//end of if
-      else if (shotMenuFlag == 1) {
-
-        if (strengthShadedRegion < 0)
-          strengthShadedRegion = 1;  // 2 strength options for shots
-          
-      }//end of else if
-      else if (popMenuFlag == 1) {
-
-        if (strengthShadedRegion < 0)
-          strengthShadedRegion = 1;  // 2 strength options for pop
-
-      }//end of else if
-      break;
+        case MENU_STATE_POPS:
+          if(pop_strength_state == POP_STRENGTH_STATE_SMALL) pop_strength_state = POP_STRENGTH_STATE_MEDIUM;
+          else pop_strength_state = (int)pop_strength_state - 1;
+        break;
+      }
+    break;
   }//end of switch
 
 }//end of up
@@ -1859,29 +1815,27 @@ void up() {
  *              Small: (chase), Regular (x oz), Tall (y oz) 
  *  
  */  
-void popStrengthPrint() {
-
+void popStrengthPrint(pop_strength_state_e pop_strength) 
+{
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_t0_14b_tf);
 
-  switch (strengthShadedRegion) {
-
-    case 0:
+  switch(pop_strength) 
+  {
+    case POP_STRENGTH_STATE_SMALL:
       u8g2.drawBox(0, 2, 110, 20);
       u8g2.drawStr(5, 18, "Small (chase)");
       u8g2.drawStr(5, 33, "Medium (1/2 can)");
-      break;
+    break;
 
-    case 1:
+    case POP_STRENGTH_STATE_MEDIUM:
       u8g2.drawBox(0, 19, 110, 17);
       u8g2.drawStr(5, 18, "Small (chase)");
       u8g2.drawStr(5, 33, "Medium (1/2 can)");
-      break;
-
+    break;
   }//end of switch
   u8g2.sendBuffer();
   return;
-
 }//end of popStrengthPrint
 
 
@@ -1894,27 +1848,26 @@ void popStrengthPrint() {
  * @note:       Single (x oz), Double (y oz)
  * 
  */
-void shotStrengthPrint() {
+void shotStrengthPrint(shot_strength_state_e strength) 
+{
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_t0_14b_tf);
 
-  switch (strengthShadedRegion) {
-    
-    case 0:
+  switch (strength) 
+  {
+    case SHOT_STRENGTH_STATE_SINGLE:
       u8g2.drawStr(5, 18, "Single");
       u8g2.drawBox(0, 2, 110, 20);
       u8g2.drawStr(5, 36, "Double");
-      break;
-    case 1:
+    break;
+    case SHOT_STRENGTH_STATE_DOUBLE:
       u8g2.drawStr(5, 18, "Single");
       u8g2.drawBox(0, 20, 110, 20);
       u8g2.drawStr(5, 36, "Double");
-      break;
-      
+    break;   
   }//end of switch
   u8g2.sendBuffer();
   return;
-
 }//end of shotStrengthPrint
 
 
@@ -1928,24 +1881,25 @@ void shotStrengthPrint() {
  * 
  * 
  */ 
-void cocktailStrengthPrint() {
-  
+void cocktailStrengthPrint(cocktail_strength_state_e strength) 
+{
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_t0_14b_tf);
-  switch (strengthShadedRegion) {
-    case 0:
+  switch (strength) 
+  {
+    case COCKTAIL_STRENGTH_STATE_WEAK:
       u8g2.drawStr(5, 18, "Weak");
       u8g2.drawBox(0, 2, 110, 20);
       u8g2.drawStr(5, 36, "Regular");
       u8g2.drawStr(5, 54, "Strong");
       break;
-    case 1:
+    case COCKTAIL_STRENGTH_STATE_REGULAR:
       u8g2.drawStr(5, 18, "Weak");
       u8g2.drawBox(0, 20, 110, 20);
       u8g2.drawStr(5, 36, "Regular");
       u8g2.drawStr(5, 54, "Strong");
       break;
-    case 2:
+    case COCKTAIL_STRENGTH_STATE_STRONG:
       u8g2.drawStr(5, 18, "Weak");
       u8g2.drawBox(0, 40, 110, 20);
       u8g2.drawStr(5, 36, "Regular");
@@ -1966,42 +1920,27 @@ void cocktailStrengthPrint() {
  * @note:       The cocktail menu is printed in this function.
  * 
  */ 
-void cockTailMenuPrint(int shadedRegion) {
-
+void cockTailMenuPrint(cocktail_menu_state_e cocktail_state) 
+{
   u8g2.setFont(u8g2_font_t0_11b_tf);
-  if (cockTailMenuFirstPass == 1) {
-    u8g2.clearBuffer();
-    cockTailMenuFirstPass = 2;
-    u8g2.drawBox(0, 0, 123, 12);
-    u8g2.drawStr(5, 10, "Whiskey + Coke");
-    u8g2.drawStr(5, 21, "Whiskey + Lemonade");
-    u8g2.drawStr(5, 32, "Whiskey + Dew");
-    u8g2.drawStr(5, 43, "Whiskey + Sprite");
-    u8g2.drawStr(5, 54, "White Rum + Coke");
-    u8g2.drawStr(5, 64, "White Rum + Lemonade");
-    u8g2.sendBuffer();
-  }//end of if
+  switch (cocktail_state) 
+  {
+    case COCKTAIL_STATE_WHISKEY_COKE:  //whiskey + coke
+      u8g2.clearBuffer();
+      u8g2.drawBox(0, 0, 123, 12);
+      u8g2.drawStr(5, 10, "Whiskey + Coke");
+      u8g2.drawStr(5, 21, "Whiskey + Lemonade");
+      u8g2.drawStr(5, 32, "Whiskey + Dew");
+      u8g2.drawStr(5, 43, "Whiskey + Sprite");
+      u8g2.drawStr(5, 54, "White Rum + Coke");
+      u8g2.drawStr(5, 64, "White Rum + Lemonade");
+      u8g2.sendBuffer();
+      reset_button_flags();
+    break;
 
-  switch (shadedRegion) {
-
-    case 0:  //whiskey + coke
-      if (upFlag || downFlag) {
-        u8g2.clearBuffer();
-        u8g2.drawBox(0, 0, 123, 12);
-        u8g2.drawStr(5, 10, "Whiskey + Coke");
-        u8g2.drawStr(5, 21, "Whiskey + Lemonade");
-        u8g2.drawStr(5, 32, "Whiskey + Dew");
-        u8g2.drawStr(5, 43, "Whiskey + Sprite");
-        u8g2.drawStr(5, 54, "White Rum + Coke");
-        u8g2.drawStr(5, 64, "White Rum + Lemonade");
-        u8g2.sendBuffer();
-        upFlag = 0;
-        downFlag = 0;
-      }//end of if
-      break;
-
-    case 1:  //whiskey + lemonade
-      if (upFlag) {
+    case COCKTAIL_STATE_WHISKEY_LEMONADE:  //whiskey + lemonade
+      if (upFlag) 
+      {
         //cockTailCount = 1;
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2026,9 +1965,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 2:  //whiskey + mountain dew
+    case COCKTAIL_STATE_WHISKEY_DEW:  //whiskey + mountain dew
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2053,9 +1992,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 3:  //whiskey + sprite
+    case COCKTAIL_STATE_WHISKEY_SPRITE:  //whiskey + sprite
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2080,9 +2019,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 4:  //white rum + coke
+    case COCKTAIL_STATE_WHITE_RUM_COKE:  //white rum + coke
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2107,9 +2046,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 5:  //white rum + lemonade
+    case COCKTAIL_STATE_WHITE_RUM_LEMONADE:  //white rum + lemonade
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2134,9 +2073,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 6:  //white rum + mountain dew
+    case COCKTAIL_STATE_WHITE_RUM_DEW:  //white rum + mountain dew
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2161,9 +2100,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 7:  //white rum + sprite
+    case COCKTAIL_STATE_WHITE_RUM_SPRITE:  //white rum + sprite
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2188,9 +2127,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 8:  //vodka + coke
+    case COCKTAIL_STATE_VODKA_COKE:  //vodka + coke
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2214,9 +2153,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 9:  //vodka + lemonade
+    case COCKTAIL_STATE_VODKA_LEMONADE:  //vodka + lemonade
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2241,9 +2180,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 10:  //vodka + mountain dew
+    case COCKTAIL_STATE_VODKA_DEW:  //vodka + mountain dew
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2268,9 +2207,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 11:  //vodka + sprite
+    case COCKTAIL_STATE_VODKA_SPRITE:  //vodka + sprite
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2295,9 +2234,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 12:  //rum + coke
+    case COCKTAIL_STATE_RUM_COKE:  //rum + coke
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2322,9 +2261,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 13:  //rum + lemonade
+    case COCKTAIL_STATE_RUM_LEMONADE:  //rum + lemonade
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2349,9 +2288,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }
-      break;
+    break;
 
-    case 14:  //rum + mountain dew
+    case COCKTAIL_STATE_RUM_DEW:  //rum + mountain dew
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2376,9 +2315,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 15:  //rum + sprite
+    case COCKTAIL_STATE_RUM_SPRITE:  //rum + sprite
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2403,9 +2342,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 16: // gin + coke
+    case COCKTAIL_STATE_GIN_COKE: // gin + coke
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2430,9 +2369,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 17: // gin + lemonade
+    case COCKTAIL_STATE_GIN_LEMONADE: // gin + lemonade
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2457,9 +2396,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 18: // gin + dew
+    case COCKTAIL_STATE_GIN_DEW: // gin + dew
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2484,9 +2423,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 19: // gin + sprite
+    case COCKTAIL_STATE_GIN_SPRITE: // gin + sprite
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 0, 123, 12);
@@ -2511,9 +2450,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 20: // tequila + coke
+    case COCKTAIL_STATE_TEQUILA_COKE: // tequila + coke
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 11, 123, 12);
@@ -2538,9 +2477,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 21: // tequila + lemonade
+    case COCKTAIL_STATE_TEQUILA_LEMONADE: // tequila + lemonade
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 22, 123, 12);
@@ -2565,9 +2504,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 22: // tequila + dew
+    case COCKTAIL_STATE_TEQUILA_DEW: // tequila + dew
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 33, 123, 12);
@@ -2592,9 +2531,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 23: // tequila + Sprite
+    case COCKTAIL_STATE_TEQUILA_SPRITE: // tequila + Sprite
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 44, 123, 12);
@@ -2619,9 +2558,9 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
 
-    case 24: // long island
+    case COCKTAIL_STATE_LONG_ISLAND: // long island
       if (upFlag) {
         u8g2.clearBuffer();
         u8g2.drawBox(0, 55, 123, 12);
@@ -2646,7 +2585,7 @@ void cockTailMenuPrint(int shadedRegion) {
         u8g2.sendBuffer();
         downFlag = 0;
       }//end of else if
-      break;
+    break;
   }//end of switch
   u8g2.sendBuffer();
 }//end of cockTailMenuPrint
@@ -2660,38 +2599,23 @@ void cockTailMenuPrint(int shadedRegion) {
  * @note:       The shot menu is printed in this function
  * 
  */
-void shotMenuPrint(int shadedRegion) {
+void shotMenuPrint(shot_menu_state_e shot_state) 
+{
   u8g2.setFont(u8g2_font_t0_11b_tf);
-  if (shotMenuFirstPass == 1) 
+  switch (shot_state) 
   {
-    u8g2.clearBuffer();
-    shotMenuFirstPass = 2;
-    u8g2.drawBox(0, 0, 123, 12);
-    u8g2.drawStr(5, 10, "Gin");
-    u8g2.drawStr(5, 21, "Spiced Rum");
-    u8g2.drawStr(5, 32, "Tequila");
-    u8g2.drawStr(5, 43, "Vodka");
-    u8g2.drawStr(5, 54, "Whiskey");
-    u8g2.drawStr(5, 64, "White Rum");
-    return;
-  }//end of if
-  switch (shadedRegion) {
-    case 0://Gin
-      if (upFlag || downFlag) 
-      {
-        u8g2.clearBuffer();
-        u8g2.drawBox(0, 0, 123, 12);
-        u8g2.drawStr(5, 10, "Gin");
-        u8g2.drawStr(5, 21, "Spiced Rum");
-        u8g2.drawStr(5, 32, "Tequila");
-        u8g2.drawStr(5, 43, "Vodka");
-        u8g2.drawStr(5, 54, "Whiskey");
-        u8g2.drawStr(5, 64, "White Rum");
-        upFlag = 0;
-        downFlag = 0;
-      }//end of if
-      break;
-    case 1://Spiced Rum
+    case SHOT_STATE_GIN://Gin
+      u8g2.clearBuffer();
+      u8g2.drawBox(0, 0, 123, 12);
+      u8g2.drawStr(5, 10, "Gin");
+      u8g2.drawStr(5, 21, "Spiced Rum");
+      u8g2.drawStr(5, 32, "Tequila");
+      u8g2.drawStr(5, 43, "Vodka");
+      u8g2.drawStr(5, 54, "Whiskey");
+      u8g2.drawStr(5, 64, "White Rum");
+      reset_button_flags();
+    break;
+    case SHOT_STATE_RUM://Spiced Rum
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2702,11 +2626,10 @@ void shotMenuPrint(int shadedRegion) {
         u8g2.drawStr(5, 43, "Vodka");
         u8g2.drawStr(5, 54, "Whiskey");
         u8g2.drawStr(5, 64, "White Rum");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
-    case 2:
+    break;
+    case SHOT_STATE_TEQUILA:
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2717,11 +2640,10 @@ void shotMenuPrint(int shadedRegion) {
         u8g2.drawStr(5, 43, "Vodka");
         u8g2.drawStr(5, 54, "Whiskey");
         u8g2.drawStr(5, 64, "White Rum");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
-    case 3:
+    break;
+    case SHOT_STATE_VODKA:
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2732,11 +2654,10 @@ void shotMenuPrint(int shadedRegion) {
         u8g2.drawStr(5, 43, "Vodka");
         u8g2.drawStr(5, 54, "Whiskey");
         u8g2.drawStr(5, 64, "White Rum");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
-    case 4:
+    break;
+    case SHOT_STATE_WHISKEY:
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2747,11 +2668,10 @@ void shotMenuPrint(int shadedRegion) {
         u8g2.drawStr(5, 43, "Vodka");
         u8g2.drawStr(5, 54, "Whiskey");
         u8g2.drawStr(5, 64, "White Rum");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
-    case 5:
+    break;
+    case SHOT_STATE_WHITE_RUM:
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2762,10 +2682,9 @@ void shotMenuPrint(int shadedRegion) {
         u8g2.drawStr(5, 43, "Vodka");
         u8g2.drawStr(5, 54, "Whiskey");
         u8g2.drawStr(5, 64, "White Rum");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
+    break;
   }//end of switch
   u8g2.sendBuffer();
 }// end of shotMenuPrint
@@ -2778,36 +2697,21 @@ void shotMenuPrint(int shadedRegion) {
  * 
  * @note:       The pop menu is printed in this funciton
  */ 
-void popMenuPrint(int shadedRegion) 
+void popMenuPrint(pop_menu_state_e pop_state) 
 {
   u8g2.setFont(u8g2_font_t0_14b_tf);
-  if (popMenuFirstPass == 1) 
+  switch (pop_state) 
   {
-    u8g2.clearBuffer();
-    popMenuFirstPass = 2;
-    u8g2.drawBox(0, 0, 123, 16);
-    u8g2.drawStr(5, 14, "Sprite");
-    u8g2.drawStr(5, 28, "Coke");
-    u8g2.drawStr(5, 42, "Lemonade");
-    u8g2.drawStr(5, 56, "Mountain Dew");
-    return;
-  }//end of if
-  switch (shadedRegion) 
-  {
-    case 0://Sprite
-      if (upFlag || downFlag) 
-      {
-        u8g2.clearBuffer();
-        u8g2.drawBox(0, 0, 123, 16);
-        u8g2.drawStr(5, 14, "Sprite");
-        u8g2.drawStr(5, 28, "Coke");
-        u8g2.drawStr(5, 42, "Lemonade");
-        u8g2.drawStr(5, 56, "Mountain Dew");
-        upFlag = 0;
-        downFlag = 0;
-      }//end of if
-      break;
-    case 1://Coke
+    case POP_STATE_SPRITE://Sprite
+      u8g2.clearBuffer();
+      u8g2.drawBox(0, 0, 123, 16);
+      u8g2.drawStr(5, 14, "Sprite");
+      u8g2.drawStr(5, 28, "Coke");
+      u8g2.drawStr(5, 42, "Lemonade");
+      u8g2.drawStr(5, 56, "Mountain Dew");
+      reset_button_flags();
+    break;
+    case POP_STATE_COKE://Coke
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2816,11 +2720,10 @@ void popMenuPrint(int shadedRegion)
         u8g2.drawStr(5, 28, "Coke");
         u8g2.drawStr(5, 42, "Lemonade");
         u8g2.drawStr(5, 56, "Mountain Dew");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
-    case 2://Lemonade
+    break;
+    case POP_STATE_LEMONADE://Lemonade
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2829,11 +2732,10 @@ void popMenuPrint(int shadedRegion)
         u8g2.drawStr(5, 28, "Coke");
         u8g2.drawStr(5, 42, "Lemonade");
         u8g2.drawStr(5, 56, "Mountain Dew");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
-    case 3://Mountain Dew
+    break;
+    case POP_STATE_DEW://Mountain Dew
       if (upFlag || downFlag) 
       {
         u8g2.clearBuffer();
@@ -2842,10 +2744,9 @@ void popMenuPrint(int shadedRegion)
         u8g2.drawStr(5, 28, "Coke");
         u8g2.drawStr(5, 42, "Lemonade");
         u8g2.drawStr(5, 56, "Mountain Dew");
-        upFlag = 0;
-        downFlag = 0;
+        reset_button_flags();
       }//end of if
-      break;
+    break;
   }//end of switch
   u8g2.sendBuffer();
 }//end of popMenuPrint
@@ -2860,18 +2761,10 @@ void popMenuPrint(int shadedRegion)
  *              Cocktails, Shots, Pop
  * 
  */
-void mainMenuPrint(int shadedRegion) 
+void mainMenuPrint(menu_states_e menu_state) 
 {
   u8g2.setFont(u8g2_font_t0_14b_tf);
-  if (firstPass) 
-  {
-    u8g2.drawStr(5, 18, "Cocktails");
-    u8g2.drawBox(0, 2, 110, 20);
-    u8g2.drawStr(5, 36, "Shots");
-    u8g2.drawStr(5, 54, "Pop");
-    firstPass++;
-  }//end of if
-  switch (shadedRegion) 
+  switch (menu_state) 
   {
     case 0:
       u8g2.clearBuffer();
@@ -2879,25 +2772,62 @@ void mainMenuPrint(int shadedRegion)
       u8g2.drawStr(5, 18, "Cocktails");
       u8g2.drawStr(5, 36, "Shots");
       u8g2.drawStr(5, 54, "Pop");
-      break;
+    break;
     case 1:
       u8g2.clearBuffer();
       u8g2.drawBox(0, 20, 110, 20);
       u8g2.drawStr(5, 18, "Cocktails");
       u8g2.drawStr(5, 36, "Shots");
       u8g2.drawStr(5, 54, "Pop");
-      break;
+    break;
     case 2:
       u8g2.clearBuffer();
       u8g2.drawBox(0, 40, 110, 20);
       u8g2.drawStr(5, 18, "Cocktails");
       u8g2.drawStr(5, 36, "Shots");
       u8g2.drawStr(5, 54, "Pop");
-      break;
+    break;
   }//end of switch
   u8g2.sendBuffer();
 }
 
+
+void reset_button_flags()
+{
+  upFlag = 0;
+  downFlag = 0;
+}
+
+
+void reset_menu_level()
+{
+  menu_level = MAIN_MENU_LVL_1;
+}
+
+
+void reset_strength_states()
+{
+  cocktail_strength_state = COCKTAIL_STRENGTH_STATE_WEAK;
+  shot_strength_state = SHOT_STRENGTH_STATE_SINGLE;
+  pop_strength_state = POP_STRENGTH_STATE_SMALL;
+}
+
+
+void reset_submenu_states()
+{
+  cocktail_state = COCKTAIL_STATE_WHISKEY_COKE;
+  shot_state = SHOT_STATE_GIN;
+  pop_state = POP_STATE_SPRITE; 
+}
+
+
+void reset_mainmenu_state()
+{
+  menu_state = MENU_STATE_COCKTAILS;
+}
+
+
+#if defined(PRINT_INTRO)
 /*
  * @function:  print_intro( void )
  * @param[in]: void
@@ -2923,7 +2853,6 @@ void print_intro()
     u8g2.setFont(u8g2_font_timB08_tf);
     for (int z = 0; z < 60; z++) 
     {
-      //if (z % 2 == 0)
       if(!(z % 2))
       {
         seeds[z] = seeds[z] + heading[z];
@@ -2982,32 +2911,6 @@ void print_intro()
     u8g2.sendBuffer();
     u8g2.clearBuffer();
   }// end of for
-  /*
-  for (int j = 0; j < 192; j += 5) 
-  {
-    if (j < 120) 
-    {
-      u8g2.drawXBM(-60 + j, -10, 64, 42, plane_bmp);
-      u8g2.drawXBM(85, 32, 41, 29, little_arduino_bmp);
-      u8g2.drawXBM(10, 43, 30, 19, finger_point_bmp);
-      if (j < 60)
-        u8g2.drawStr(40 + j - 1, 52, ".");  // did you notice the finger shoots a bullet?!
-      u8g2.drawStr(0, 42, "Powered By");
-      u8g2.sendBuffer();  // how fun?!
-      u8g2.clearBuffer();
-    }
-    else
-    {
-      u8g2.drawXBM(-60 + j, -10, 64, 42, plane_bmp);
-      u8g2.drawXBM(85, 32, 41, 29, little_arduino_bmp);
-      u8g2.drawXBM(10, 43, 30, 19, finger_point_bmp);
-      u8g2.drawStr(0, 42, "Powered By");
-      u8g2.drawXBM(58, 15 + (j - 98) / 3, 20, 20, bombski_bmp);
-      u8g2.sendBuffer();
-      u8g2.clearBuffer();
-    }
-  }
-  */
   u8g2.setFont(u8g2_font_synchronizer_nbp_tf);
   u8g2.drawXBM(0, 0, 32, 64, destruction_bmp);
   u8g2.drawXBM(32, 0, 64, 64, explosion_bmp);
@@ -3031,3 +2934,4 @@ void print_intro()
   u8g2.sendBuffer();
   delay(3000);
 }// end of print_intro()
+#endif
